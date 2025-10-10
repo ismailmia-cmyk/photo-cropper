@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Passport Photo Cropper</title>
+  <!-- PWA Meta Tags -->
+  <meta name="theme-color" content="#ffffff">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Passport Cropper">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="manifest" href="manifest.json">
+  <style>
+    * { box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+      text-align: center; 
+      margin: 10px; 
+      background-color: #f9f9f9; 
+      color: #333; 
+      touch-action: manipulation;
+    }
+    h1 { color: #222; font-size: 1.4em; margin: 10px 0; }
+    .container { 
+      max-width: 620px; 
+      margin: 0 auto; 
+      display: flex; 
+      flex-direction: column; 
+      align-items: center; 
+    }
+    .preview-container {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    #imageCanvas { 
+      border: 1px solid #ddd; 
+      cursor: crosshair; 
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+      width: 100%; 
+      max-width: 300px; 
+      height: auto; 
+      aspect-ratio: 1/1; 
+      touch-action: none;
+    }
+    #croppedImage { 
+      border: 1px solid #ddd; 
+      max-width: 300px; 
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+      display: none; 
+    }
+    button, select, input[type="file"] { 
+      margin: 6px; 
+      padding: 10px 16px; 
+      font-size: 14px; 
+      border: 1px solid #ccc; 
+      border-radius: 6px; 
+      background-color: #fff; 
+      cursor: pointer; 
+      transition: background-color 0.2s, box-shadow 0.2s; 
+      width: 80%; 
+      max-width: 250px; 
+    }
+    button:hover, button:focus { 
+      background-color: #f0f0f0; 
+      box-shadow: 0 1px 5px rgba(0,0,0,0.1); 
+    }
+    button:disabled {
+      background-color: #e0e0e0;
+      cursor: not-allowed;
+    }
+    label { cursor: pointer; font-size: 14px; margin: 6px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Passport Photo Cropper</h1>
+
+    <label for="imageUpload">Upload Image:</label>
+    <input type="file" id="imageUpload" accept="image/*" aria-label="Upload your photo for cropping"><br>
+
+    <label for="passportType">Passport Type:</label>
+    <select id="passportType" aria-label="Select passport type">
+      <option value="uk">UK Passport (7:9)</option>
+      <option value="us">US Passport (1:1)</option>
+    </select><br>
+
+    <button id="cropBtn" aria-label="Crop the selected image area" disabled>Crop Image</button>
+    <button id="resetBtn" aria-label="Reset the canvas and clear the current image" disabled>Reset</button><br>
+
+    <label>
+      <input type="checkbox" id="downloadAsPng">
+      Download as PNG
+    </label><br>
+
+    <div class="preview-container">
+      <canvas id="imageCanvas" width="300" height="300" aria-label="Canvas for selecting and cropping passport photo"></canvas>
+      <img id="croppedImage" src="#" alt="Cropped passport photo preview" style="display:none;">
+    </div>
+
+    <button id="downloadBtn" style="display:none;" aria-label="Download the cropped image" disabled>Download Cropped Image</button>
+  </div>
+
+  <script>
+    const CONFIG = {
+      HANDLE_SIZE: 8,
+      INITIAL_SELECTION: { x: 100, y: 100, width: 100, height: 100 },
+      MAX_FILE_SIZE: 5 * 1024 * 1024, // 5MB
+      PASSPORT_SIZES: {
+        uk: { width: 413, height: 531, ratio: 7/9 },
+        us: { width: 600, height: 600, ratio: 1 }
+      }
+    };
+
+    const imageUpload = document.getElementById('imageUpload');
+    const passportType = document.getElementById('passportType');
+    const cropBtn = document.getElementById('cropBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const imageCanvas = document.getElementById('imageCanvas');
+    const croppedImage = document.getElementById('croppedImage');
+    const downloadAsPng = document.getElementById('downloadAsPng');
+    const ctx = imageCanvas.getContext('2d');
+
+    let uploadedImage = null;
+    let selection = { ...CONFIG.INITIAL_SELECTION };
+    let dragging = false;
+    let resizing = false;
+    let resizeHandle = null;
+    let startX, startY;
+    let scale = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+    let displayWidth = 0;
+    let displayHeight = 0;
+    let lastMoveTime = 0;
+
+    // Browser compatibility check
+    if (!imageCanvas.getContext) {
+      alert('Your browser does not support canvas. Please use a modern browser.');
+    }
+
+    imageUpload.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith('image/')) {
+        alert('Please upload a valid image file.');
+        return;
+      }
+      if (file.size > CONFIG.MAX_FILE_SIZE) {
+        alert('Image size exceeds 5MB limit.');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        uploadedImage = new Image();
+        uploadedImage.onload = () => {
+          // Set initial selection ratio based on passport type
+          const ratio = getPassportSize().ratio;
+          selection = { 
+            x: CONFIG.INITIAL_SELECTION.x, 
+            y: CONFIG.INITIAL_SELECTION.y, 
+            width: CONFIG.INITIAL_SELECTION.width, 
+            height: CONFIG.INITIAL_SELECTION.width / ratio 
+          };
+          drawImageToCanvas();
+          cropBtn.disabled = false;
+          resetBtn.disabled = false;
+          downloadBtn.style.display = 'none';
+          downloadBtn.disabled = true;
+          croppedImage.style.display = 'none';
+        };
+        uploadedImage.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    passportType.addEventListener('change', () => {
+      if (uploadedImage) {
+        // Update selection ratio based on new passport type
+        const ratio = getPassportSize().ratio;
+        const centerX = selection.x + selection.width / 2;
+        const centerY = selection.y + selection.height / 2;
+        const currentWidth = selection.width;
+        selection = {
+          x: centerX - currentWidth / 2,
+          y: centerY - (currentWidth / ratio) / 2,
+          width: currentWidth,
+          height: currentWidth / ratio
+        };
+        drawImageToCanvas();
+      }
+    });
+
+    resetBtn.addEventListener('click', () => {
+      uploadedImage = null;
+      selection = { ...CONFIG.INITIAL_SELECTION, height: CONFIG.INITIAL_SELECTION.width / getPassportSize().ratio };
+      ctx.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+      croppedImage.src = '#';
+      croppedImage.style.display = 'none';
+      downloadBtn.style.display = 'none';
+      downloadBtn.disabled = true;
+      imageUpload.value = '';
+      cropBtn.disabled = true;
+      resetBtn.disabled = true;
+    });
+
+    function drawImageToCanvas() {
+      const canvasWidth = imageCanvas.width;
+      const canvasHeight = imageCanvas.height;
+      ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+      scale = Math.min(canvasWidth / uploadedImage.width, canvasHeight / uploadedImage.height);
+      displayWidth = uploadedImage.width * scale;
+      displayHeight = uploadedImage.height * scale;
+      offsetX = (canvasWidth - displayWidth) / 2;
+      offsetY = (canvasHeight - displayHeight) / 2;
+      ctx.drawImage(uploadedImage, offsetX, offsetY, displayWidth, displayHeight);
+      drawSelectionOverlay();
+    }
+
+    function drawSelectionOverlay() {
+      if (!uploadedImage) return;
+
+      ctx.save();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+      ctx.fillRect(0, 0, imageCanvas.width, imageCanvas.height);
+
+      ctx.beginPath();
+      ctx.rect(selection.x, selection.y, selection.width, selection.height);
+      ctx.clip();
+      ctx.clearRect(selection.x, selection.y, selection.width, selection.height);
+      ctx.drawImage(uploadedImage, offsetX, offsetY, displayWidth, displayHeight);
+      ctx.restore();
+
+      ctx.save();
+      ctx.strokeStyle = 'red';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(selection.x, selection.y, selection.width, selection.height);
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#000';
+      for (const h of getHandles()) {
+        ctx.fillRect(h.x - CONFIG.HANDLE_SIZE/2, h.y - CONFIG.HANDLE_SIZE/2, CONFIG.HANDLE_SIZE, CONFIG.HANDLE_SIZE);
+        ctx.strokeRect(h.x - CONFIG.HANDLE_SIZE/2, h.y - CONFIG.HANDLE_SIZE/2, CONFIG.HANDLE_SIZE, CONFIG.HANDLE_SIZE);
+      }
+      ctx.restore();
+    }
+
+    function getHandles() {
+      const { x, y, width, height } = selection;
+      return [
+        { name: 'tl', x, y },
+        { name: 'tr', x: x + width, y },
+        { name: 'bl', x, y: y + height },
+        { name: 'br', x: x + width, y: y + height }
+      ];
+    }
+
+    function getHandleAt(mx, my) {
+      for (const h of getHandles()) {
+        if (mx >= h.x - CONFIG.HANDLE_SIZE && mx <= h.x + CONFIG.HANDLE_SIZE &&
+            my >= h.y - CONFIG.HANDLE_SIZE && my <= h.y + CONFIG.HANDLE_SIZE) return h.name;
+      }
+      return null;
+    }
+
+    // Mouse events
+    imageCanvas.addEventListener('mousedown', handleStart);
+    imageCanvas.addEventListener('mousemove', handleMove);
+    imageCanvas.addEventListener('mouseup', handleEnd);
+
+    // Touch events for mobile
+    imageCanvas.addEventListener('touchstart', handleStart);
+    imageCanvas.addEventListener('touchmove', handleMove);
+    imageCanvas.addEventListener('touchend', handleEnd);
+
+    function handleStart(e) {
+      e.preventDefault();
+      if (!uploadedImage) return;
+      const { clientX, clientY } = e.touches ? e.touches[0] : e;
+      const rect = imageCanvas.getBoundingClientRect();
+      const mx = clientX - rect.left;
+      const my = clientY - rect.top;
+      const handle = getHandleAt(mx, my);
+      if (handle) {
+        resizing = true;
+        resizeHandle = handle;
+        imageCanvas.style.cursor = 'grab';
+      } else if (mx > selection.x && mx < selection.x + selection.width && my > selection.y && my < selection.y + selection.height) {
+        dragging = true;
+        imageCanvas.style.cursor = 'move';
+      } else {
+        const ratio = getPassportSize().ratio;
+        selection = { x: mx, y: my, width: 0, height: 0 };
+        resizing = true;
+        resizeHandle = 'br';
+      }
+      startX = mx;
+      startY = my;
+    }
+
+    function handleMove(e) {
+      e.preventDefault();
+      if (!uploadedImage || (!dragging && !resizing) || (Date.now() - lastMoveTime < 16)) return;
+      lastMoveTime = Date.now();
+      const { clientX, clientY } = e.touches ? e.touches[0] : e;
+      const rect = imageCanvas.getBoundingClientRect();
+      const mx = clientX - rect.left;
+      const my = clientY - rect.top;
+      const handle = getHandleAt(mx, my);
+      if (handle) {
+        imageCanvas.style.cursor = 'pointer';
+      } else if (mx > selection.x && mx < selection.x + selection.width && my > selection.y && my < selection.y + selection.height) {
+        imageCanvas.style.cursor = 'move';
+      } else {
+        imageCanvas.style.cursor = 'crosshair';
+      }
+      if (dragging) {
+        const dx = mx - startX, dy = my - startY;
+        selection.x += dx;
+        selection.y += dy;
+        startX = mx;
+        startY = my;
+      } else if (resizing) {
+        resizeSelection(mx, my);
+      }
+      drawImageToCanvas();
+    }
+
+    function handleEnd(e) {
+      e.preventDefault();
+      dragging = false;
+      resizing = false;
+      resizeHandle = null;
+      imageCanvas.style.cursor = 'crosshair';
+    }
+
+    // Basic keyboard support (for desktop)
+    document.addEventListener('keydown', (e) => {
+      if (!uploadedImage) return;
+      const step = e.shiftKey ? 10 : 1;
+      switch (e.key) {
+        case 'ArrowLeft': selection.x -= step; break;
+        case 'ArrowRight': selection.x += step; break;
+        case 'ArrowUp': selection.y -= step; break;
+        case 'ArrowDown': selection.y += step; break;
+      }
+      drawImageToCanvas();
+    });
+
+    function resizeSelection(mx, my) {
+      const ratio = getPassportSize().ratio;
+      let dx = mx - startX, dy = my - startY;
+      switch (resizeHandle) {
+        case 'br': 
+          selection.width += dx; 
+          selection.height = selection.width / ratio; 
+          break;
+        case 'tr': 
+          selection.height -= dy; 
+          selection.width = selection.height * ratio; 
+          selection.y += dy; 
+          break;
+        case 'bl': 
+          selection.width -= dx; 
+          selection.height = selection.width / ratio; 
+          selection.x += dx; 
+          break;
+        case 'tl': 
+          selection.width -= dx; 
+          selection.height = selection.width / ratio; 
+          selection.x += dx; 
+          selection.y += dy; 
+          break;
+      }
+      startX = mx;
+      startY = my;
+    }
+
+    cropBtn.addEventListener('click', () => {
+      if (!uploadedImage) {
+        alert('Please upload an image before cropping.');
+        return;
+      }
+      performCrop(selection);
+    });
+
+    function performCrop(sel) {
+      const { width: cropW, height: cropH } = getPassportSize();
+
+      // Map selection to original image coordinates
+      const origX = (sel.x - offsetX) / scale;
+      const origY = (sel.y - offsetY) / scale;
+      const origWidth = sel.width / scale;
+      const origHeight = sel.height / scale;
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = cropW;
+      tempCanvas.height = cropH;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(
+        uploadedImage,
+        origX, origY, origWidth, origHeight,
+        0, 0, cropW, cropH
+      );
+
+      const isPng = downloadAsPng.checked;
+      const imageURL = isPng
+        ? tempCanvas.toDataURL('image/png')
+        : tempCanvas.toDataURL('image/jpeg', 0.95);
+
+      croppedImage.src = imageURL;
+      croppedImage.style.display = 'block';
+      downloadBtn.style.display = 'block';
+      downloadBtn.disabled = false;
+      resetBtn.disabled = false;
+
+      // Set up download button
+      downloadBtn.onclick = () => autoDownload(imageURL, isPng);
+    }
+
+    function getPassportSize() {
+      return CONFIG.PASSPORT_SIZES[passportType.value];
+    }
+
+    function autoDownload(dataUrl, isPng) {
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `passport_photo_${passportType.value}.${isPng ? 'png' : 'jpg'}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    // Register service worker for PWA
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('service-worker.js')
+          .then(reg => console.log('Service Worker registered'))
+          .catch(err => console.log('Service Worker registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
